@@ -16,6 +16,14 @@ import { StatusCommand } from "./commands/status.command";
 import { UnlockCommand } from "./key-management/commands/unlock.command";
 import { Response } from "./models/response";
 import { FileResponse } from "./models/response/file.response";
+import {
+  findUnsupportedQueryParams,
+  GET_QUERY_PARAMS,
+  LIST_QUERY_PARAMS,
+  SEND_GET_QUERY_PARAMS,
+  SEND_LIST_QUERY_PARAMS,
+  unsupportedQueryParamsResponse,
+} from "./serve-query-params";
 import { ServiceContainer } from "./service-container/service-container";
 import { GenerateCommand } from "./tools/generate.command";
 import {
@@ -243,6 +251,13 @@ export class OssServeConfigurator {
         await next();
         return;
       }
+      const supported = ctx.params.object === "send" ? SEND_LIST_QUERY_PARAMS : LIST_QUERY_PARAMS;
+      const unsupported = this.rejectUnsupportedQueryParams(ctx, supported);
+      if (unsupported != null) {
+        this.processResponse(ctx.response, unsupported);
+        await next();
+        return;
+      }
       let response: Response = null;
       if (ctx.params.object === "send") {
         response = await this.sendListCommand.run(ctx.request.query);
@@ -255,6 +270,12 @@ export class OssServeConfigurator {
 
     router.get("/send/list", async (ctx, next) => {
       if (await this.errorIfLocked(ctx.response)) {
+        await next();
+        return;
+      }
+      const unsupported = this.rejectUnsupportedQueryParams(ctx, SEND_LIST_QUERY_PARAMS);
+      if (unsupported != null) {
+        this.processResponse(ctx.response, unsupported);
         await next();
         return;
       }
@@ -399,6 +420,13 @@ export class OssServeConfigurator {
         await next();
         return;
       }
+      const supported = ctx.params.object === "send" ? SEND_GET_QUERY_PARAMS : GET_QUERY_PARAMS;
+      const unsupported = this.rejectUnsupportedQueryParams(ctx, supported);
+      if (unsupported != null) {
+        this.processResponse(ctx.response, unsupported);
+        await next();
+        return;
+      }
       let response: Response = null;
       if (ctx.params.object === "send") {
         response = await this.sendGetCommand.run(ctx.params.id, null);
@@ -438,6 +466,26 @@ export class OssServeConfigurator {
       this.processResponse(ctx.response, response);
       await next();
     });
+  }
+
+  /**
+   * Fails the request when it carries a query parameter the route does not
+   * understand, rather than letting the command silently ignore it.
+   *
+   * @returns the error `Response` to hand back, or `null` when the request is fine.
+   */
+  protected rejectUnsupportedQueryParams(
+    ctx: koa.Context,
+    supported: readonly string[],
+  ): Response | null {
+    const unsupported = findUnsupportedQueryParams(
+      ctx.request.query as Record<string, unknown>,
+      supported,
+    );
+    if (unsupported.length === 0) {
+      return null;
+    }
+    return unsupportedQueryParamsResponse(unsupported, supported);
   }
 
   protected processResponse(res: koa.Response, commandResponse: Response) {
