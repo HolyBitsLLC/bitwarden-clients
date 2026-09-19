@@ -71,8 +71,16 @@ export class VaultProgram extends BaseProgram {
       .option("--folderid <folderid>", "Filter items by folder id.")
       .option("--collectionid <collectionid>", "Filter items by collection id.")
       .option(
+        "--collectionname <collectionname>",
+        "Filter items or collections by collection name.",
+      )
+      .option(
         "--organizationid <organizationid>",
         "Filter items or collections by organization id.",
+      )
+      .option(
+        "--organizationname <organizationname>",
+        "Filter items, collections or organizations by organization name.",
       )
       .option("--trash", "Filter items that are deleted and in the trash.")
       .on("--help", () => {
@@ -81,6 +89,9 @@ export class VaultProgram extends BaseProgram {
         writeLn("    Combining search with a filter performs a logical AND operation.");
         writeLn("");
         writeLn("    Combining multiple filters performs a logical OR operation.");
+        writeLn("");
+        writeLn("    Names are resolved against the synced vault. A name that matches no");
+        writeLn("    object, or more than one object, is an error.");
         writeLn("");
         writeLn("  Examples:");
         writeLn("");
@@ -98,6 +109,7 @@ export class VaultProgram extends BaseProgram {
         writeLn("    bw list items --trash");
         writeLn("    bw list items --archived");
         writeLn("    bw list folders --search email");
+        writeLn("    bw list items --organizationname 'Example Org' --collectionname 'Servers'");
         writeLn("    bw list org-members --organizationid 60556c31-e649-4b5d-8daf-fc1c391a1bf2");
         writeLn("", true);
       })
@@ -156,13 +168,23 @@ export class VaultProgram extends BaseProgram {
       .option("--itemid <itemid>", "Attachment's item id.")
       .option("--output <output>", "Output directory or filename for attachment.")
       .option("--organizationid <organizationid>", "Organization id for an organization object.")
+      .option(
+        "--organizationname <organizationname>",
+        "Scope a by-name lookup to an organization name.",
+      )
+      .option("--collectionid <collectionid>", "Scope a by-name lookup to a collection id.")
+      .option("--collectionname <collectionname>", "Scope a by-name lookup to a collection name.")
       .on("--help", () => {
         writeLn("\n  If raw output is specified and no output filename or directory is given for");
         writeLn("  an attachment query, the attachment content is written to stdout.");
         writeLn("");
+        writeLn("  Names are resolved against the synced vault. A name that matches no");
+        writeLn("  object, or more than one object, is an error.");
+        writeLn("");
         writeLn("  Examples:");
         writeLn("");
         writeLn("    bw get item 99ee88d2-6046-4ea7-92c2-acac464b1412");
+        writeLn("    bw get item 'Example Service' --organizationname 'Example Org'");
         writeLn("    bw get password https://google.com");
         writeLn("    bw get totp google.com");
         writeLn("    bw get notes google.com");

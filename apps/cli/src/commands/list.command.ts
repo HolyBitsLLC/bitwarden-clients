@@ -30,6 +30,7 @@ import { CliUtils } from "../utils";
 import { CipherResponse } from "../vault/models/cipher.response";
 import { FolderResponse } from "../vault/models/folder.response";
 import { CliRestrictedItemTypesService } from "../vault/services/cli-restricted-item-types.service";
+import { CliNameFilterService } from "../vault/services/name-filter.service";
 
 export class ListCommand {
   constructor(
@@ -49,6 +50,11 @@ export class ListCommand {
 
   async run(object: string, cmdOptions: Record<string, any>): Promise<Response> {
     const normalizedOptions = new Options(cmdOptions);
+    const nameFilterResponse = await this.applyNameFilters(normalizedOptions);
+    if (nameFilterResponse != null) {
+      return nameFilterResponse;
+    }
+
     switch (object.toLowerCase()) {
       case "items":
         return await this.listCiphers(normalizedOptions);
@@ -65,6 +71,62 @@ export class ListCommand {
       default:
         return Response.badRequest("Unknown object.");
     }
+  }
+
+  /**
+   * Resolves the optional `organizationName`/`collectionName` filters into the
+   * ids the rest of this command filters by.
+   *
+   * Names resolve against the vault the CLI has already synced, so no additional
+   * API call is made. A name that matches nothing, or matches more than one
+   * object, is an error: silently dropping or widening a filter is what makes a
+   * name filter dangerous.
+   *
+   * @returns an error `Response`, or `null` when the filters were resolved (or absent).
+   */
+  private async applyNameFilters(options: Options): Promise<Response | null> {
+    if (options.organizationName == null && options.collectionName == null) {
+      return null;
+    }
+
+    const userId = await firstValueFrom(this.accountService.activeAccount$.pipe(getUserId));
+    if (!userId) {
+      return Response.badRequest("No user found.");
+    }
+
+    const nameFilter = new CliNameFilterService(this.organizationService, this.collectionService);
+
+    if (options.organizationName != null) {
+      const organization = await nameFilter.resolveOrganization(userId, options.organizationName);
+      if (organization instanceof Response) {
+        return organization;
+      }
+      if (options.organizationId != null && options.organizationId !== organization.id) {
+        return Response.badRequest(
+          "`organizationid` and `organizationname` refer to different organizations.",
+        );
+      }
+      options.organizationId = organization.id;
+    }
+
+    if (options.collectionName != null) {
+      const collection = await nameFilter.resolveCollection(
+        userId,
+        options.collectionName,
+        options.organizationId,
+      );
+      if (collection instanceof Response) {
+        return collection;
+      }
+      if (options.collectionId != null && options.collectionId !== collection.id) {
+        return Response.badRequest(
+          "`collectionid` and `collectionname` refer to different collections.",
+        );
+      }
+      options.collectionId = collection.id;
+    }
+
+    return null;
   }
 
   private async listCiphers(options: Options) {
@@ -291,6 +353,10 @@ export class ListCommand {
     }
     let organizations = await firstValueFrom(this.organizationService.memberOrganizations$(userId));
 
+    if (options.organizationId != null) {
+      organizations = organizations.filter((o) => o.id === options.organizationId);
+    }
+
     if (options.search != null && options.search.trim() !== "") {
       organizations = CliUtils.searchOrganizations(organizations, options.search);
     }
@@ -313,7 +379,9 @@ export class ListCommand {
 
 class Options {
   organizationId: string;
+  organizationName: string;
   collectionId: string;
+  collectionName: string;
   folderId: string;
   search: string;
   url: string;
@@ -322,7 +390,10 @@ class Options {
 
   constructor(passedOptions: Record<string, any>) {
     this.organizationId = passedOptions?.organizationid || passedOptions?.organizationId;
+    this.organizationName =
+      passedOptions?.organizationname || passedOptions?.organizationName || null;
     this.collectionId = passedOptions?.collectionid || passedOptions?.collectionId;
+    this.collectionName = passedOptions?.collectionname || passedOptions?.collectionName || null;
     this.folderId = passedOptions?.folderid || passedOptions?.folderId;
     this.search = passedOptions?.search;
     this.url = passedOptions?.url;

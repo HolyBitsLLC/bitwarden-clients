@@ -55,6 +55,7 @@ import { CliUtils } from "../utils";
 import { CipherResponse } from "../vault/models/cipher.response";
 import { FolderResponse } from "../vault/models/folder.response";
 import { CliRestrictedItemTypesService } from "../vault/services/cli-restricted-item-types.service";
+import { CliNameFilterService } from "../vault/services/name-filter.service";
 
 import { DownloadCommand } from "./download.command";
 
@@ -86,21 +87,26 @@ export class GetCommand extends DownloadCommand {
     }
 
     const normalizedOptions = new Options(cmdOptions);
+    const nameFilterResponse = await this.applyNameFilters(normalizedOptions);
+    if (nameFilterResponse != null) {
+      return nameFilterResponse;
+    }
+
     switch (object.toLowerCase()) {
       case "item":
-        return await this.getCipher(id);
+        return await this.getCipher(id, undefined, normalizedOptions);
       case "username":
-        return await this.getUsername(id);
+        return await this.getUsername(id, normalizedOptions);
       case "password":
-        return await this.getPassword(id);
+        return await this.getPassword(id, normalizedOptions);
       case "uri":
-        return await this.getUri(id);
+        return await this.getUri(id, normalizedOptions);
       case "totp":
-        return await this.getTotp(id);
+        return await this.getTotp(id, normalizedOptions);
       case "notes":
-        return await this.getNotes(id);
+        return await this.getNotes(id, normalizedOptions);
       case "exposed":
-        return await this.getExposed(id);
+        return await this.getExposed(id, normalizedOptions);
       case "attachment":
         return await this.getAttachment(id, normalizedOptions);
       case "folder":
@@ -120,7 +126,70 @@ export class GetCommand extends DownloadCommand {
     }
   }
 
-  private async getCipherView(id: string, userId: UserId): Promise<CipherView | CipherView[]> {
+  /**
+   * Resolves the optional `organizationName`/`collectionName` selectors into the
+   * ids used to scope a by-name lookup.
+   *
+   * A name lookup that matches several items is ambiguous, and an automated
+   * caller cannot act on the id list alone — it needs to be able to ask for one
+   * item precisely. Scoping by organization and collection names (resolved from
+   * the already-synced vault) is that precise selector.
+   *
+   * @returns an error `Response`, or `null` when the selectors were resolved (or absent).
+   */
+  private async applyNameFilters(options: Options): Promise<Response | null> {
+    if (options.organizationName == null && options.collectionName == null) {
+      return null;
+    }
+
+    const activeUserId = await firstValueFrom(this.accountService.activeAccount$.pipe(getUserId));
+    if (!activeUserId) {
+      return Response.badRequest("No user found.");
+    }
+
+    const nameFilter = new CliNameFilterService(this.organizationService, this.collectionService);
+
+    if (options.organizationName != null) {
+      const organization = await nameFilter.resolveOrganization(
+        activeUserId,
+        options.organizationName,
+      );
+      if (organization instanceof Response) {
+        return organization;
+      }
+      if (options.organizationId != null && options.organizationId !== organization.id) {
+        return Response.badRequest(
+          "`organizationid` and `organizationname` refer to different organizations.",
+        );
+      }
+      options.organizationId = organization.id;
+    }
+
+    if (options.collectionName != null) {
+      const collection = await nameFilter.resolveCollection(
+        activeUserId,
+        options.collectionName,
+        options.organizationId,
+      );
+      if (collection instanceof Response) {
+        return collection;
+      }
+      if (options.collectionId != null && options.collectionId !== collection.id) {
+        return Response.badRequest(
+          "`collectionid` and `collectionname` refer to different collections.",
+        );
+      }
+      options.collectionId = collection.id;
+    }
+
+    return null;
+  }
+
+  private async getCipherView(
+    id: string,
+    userId: UserId,
+    options?: Options,
+  ): Promise<CipherView | CipherView[]> {
     let decCipher: CipherView = null;
 
     if (Utils.isGuid(id)) {
@@ -132,6 +201,7 @@ export class GetCommand extends DownloadCommand {
       let ciphers = await this.cipherService.getAllDecrypted(userId);
       ciphers = ciphers.filter((c) => !c.isDeleted && !c.isArchived);
       ciphers = this.searchService.searchCiphersBasic(ciphers, id);
+      ciphers = this.applyItemSelectors(ciphers, options);
       if (ciphers.length > 1) {
         return ciphers;
       }
@@ -143,10 +213,33 @@ export class GetCommand extends DownloadCommand {
     return decCipher;
   }
 
-  private async getCipher(id: string, filter?: (c: CipherView) => boolean) {
+  /**
+   * Narrows a by-name match set to the organization and/or collection the caller
+   * selected. Selectors are only meaningful for by-name lookups — an id is
+   * already unambiguous.
+   */
+  private applyItemSelectors(ciphers: CipherView[], options?: Options): CipherView[] {
+    if (options == null || (options.organizationId == null && options.collectionId == null)) {
+      return ciphers;
+    }
+    return ciphers.filter((c) => {
+      if (options.organizationId != null && c.organizationId !== options.organizationId) {
+        return false;
+      }
+      if (
+        options.collectionId != null &&
+        (c.collectionIds ?? []).indexOf(options.collectionId) < 0
+      ) {
+        return false;
+      }
+      return true;
+    });
+  }
+
+  private async getCipher(id: string, filter?: (c: CipherView) => boolean, options?: Options) {
     const activeUserId = await firstValueFrom(this.accountService.activeAccount$.pipe(getUserId));
 
-    let decCipher = await this.getCipherView(id, activeUserId);
+    let decCipher = await this.getCipherView(id, activeUserId, options);
     if (decCipher == null) {
       return Response.notFound();
     }
@@ -170,7 +263,15 @@ export class GetCommand extends DownloadCommand {
       if (decCipher.length === 1) {
         decCipher = decCipher[0];
       } else {
-        return Response.multipleResults(decCipher.map((c) => c.id));
+        return Response.multipleResults(
+          decCipher.map((c) => c.id),
+          decCipher.map((c) => ({
+            id: c.id,
+            name: c.name,
+            organizationId: c.organizationId,
+            collectionIds: c.collectionIds,
+          })),
+        );
       }
     } else {
       const isCipherRestricted =
@@ -196,10 +297,11 @@ export class GetCommand extends DownloadCommand {
     return Response.success(res);
   }
 
-  private async getUsername(id: string) {
+  private async getUsername(id: string, options?: Options) {
     const cipherResponse = await this.getCipher(
       id,
       (c) => c.type === CipherType.Login && !Utils.isNullOrWhitespace(c.login.username),
+      options,
     );
     if (!cipherResponse.success) {
       return cipherResponse;
@@ -218,10 +320,11 @@ export class GetCommand extends DownloadCommand {
     return Response.success(res);
   }
 
-  private async getPassword(id: string) {
+  private async getPassword(id: string, options?: Options) {
     const cipherResponse = await this.getCipher(
       id,
       (c) => c.type === CipherType.Login && !Utils.isNullOrWhitespace(c.login.password),
+      options,
     );
     if (!cipherResponse.success) {
       return cipherResponse;
@@ -240,7 +343,7 @@ export class GetCommand extends DownloadCommand {
     return Response.success(res);
   }
 
-  private async getUri(id: string) {
+  private async getUri(id: string, options?: Options) {
     const cipherResponse = await this.getCipher(
       id,
       (c) =>
@@ -248,6 +351,7 @@ export class GetCommand extends DownloadCommand {
         c.login.uris != null &&
         c.login.uris.length > 0 &&
         c.login.uris[0].uri !== "",
+      options,
     );
     if (!cipherResponse.success) {
       return cipherResponse;
@@ -270,10 +374,11 @@ export class GetCommand extends DownloadCommand {
     return Response.success(res);
   }
 
-  private async getTotp(id: string) {
+  private async getTotp(id: string, options?: Options) {
     const cipherResponse = await this.getCipher(
       id,
       (c) => c.type === CipherType.Login && !Utils.isNullOrWhitespace(c.login.totp),
+      options,
     );
     if (!cipherResponse.success) {
       return cipherResponse;
@@ -314,8 +419,12 @@ export class GetCommand extends DownloadCommand {
     return Response.success(res);
   }
 
-  private async getNotes(id: string) {
-    const cipherResponse = await this.getCipher(id, (c) => !Utils.isNullOrWhitespace(c.notes));
+  private async getNotes(id: string, options?: Options) {
+    const cipherResponse = await this.getCipher(
+      id,
+      (c) => !Utils.isNullOrWhitespace(c.notes),
+      options,
+    );
     if (!cipherResponse.success) {
       return cipherResponse;
     }
@@ -329,8 +438,8 @@ export class GetCommand extends DownloadCommand {
     return Response.success(res);
   }
 
-  private async getExposed(id: string) {
-    const passwordResponse = await this.getPassword(id);
+  private async getExposed(id: string, options?: Options) {
+    const passwordResponse = await this.getPassword(id, options);
     if (!passwordResponse.success) {
       return passwordResponse;
     }
@@ -348,13 +457,13 @@ export class GetCommand extends DownloadCommand {
     }
 
     const itemId = options.itemId.toLowerCase();
-    const cipherResponse = await this.getCipher(itemId);
+    const cipherResponse = await this.getCipher(itemId, undefined, options);
     if (!cipherResponse.success) {
       return cipherResponse;
     }
 
     const activeUserId = await firstValueFrom(this.accountService.activeAccount$.pipe(getUserId));
-    const cipher = await this.getCipherView(itemId, activeUserId);
+    const cipher = await this.getCipherView(itemId, activeUserId, options);
     if (
       cipher == null ||
       Array.isArray(cipher) ||
@@ -474,7 +583,14 @@ export class GetCommand extends DownloadCommand {
       );
       collections = CliUtils.searchCollections(collections, id);
       if (collections.length > 1) {
-        return Response.multipleResults(collections.map((c) => c.id));
+        return Response.multipleResults(
+          collections.map((c) => c.id),
+          collections.map((c) => ({
+            id: c.id,
+            name: c.name,
+            organizationId: c.organizationId,
+          })),
+        );
       }
       if (collections.length > 0) {
         decCollection = collections[0];
@@ -551,7 +667,10 @@ export class GetCommand extends DownloadCommand {
       let orgs = await firstValueFrom(this.organizationService.organizations$(userId));
       orgs = CliUtils.searchOrganizations(orgs, id);
       if (orgs.length > 1) {
-        return Response.multipleResults(orgs.map((c) => c.id));
+        return Response.multipleResults(
+          orgs.map((c) => c.id),
+          orgs.map((c) => ({ id: c.id, name: c.name })),
+        );
       }
       if (orgs.length > 0) {
         org = orgs[0];
@@ -675,10 +794,17 @@ export class GetCommand extends DownloadCommand {
 class Options {
   itemId: string;
   organizationId: string;
+  organizationName: string;
+  collectionId: string;
+  collectionName: string;
   output: string;
 
   constructor(passedOptions: Record<string, any>) {
     this.organizationId = passedOptions?.organizationid || passedOptions?.organizationId;
+    this.organizationName =
+      passedOptions?.organizationname || passedOptions?.organizationName || null;
+    this.collectionId = passedOptions?.collectionid || passedOptions?.collectionId;
+    this.collectionName = passedOptions?.collectionname || passedOptions?.collectionName || null;
     this.itemId = passedOptions?.itemid || passedOptions?.itemId;
     this.output = passedOptions?.output;
   }
